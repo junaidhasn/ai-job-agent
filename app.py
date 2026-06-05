@@ -3,7 +3,10 @@ import streamlit as st
 from dotenv import load_dotenv
 from groq import Groq
 from docx import Document
-import subprocess, tempfile
+from docx.shared import Pt, Inches
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
 
 load_dotenv()
 
@@ -355,25 +358,6 @@ textarea:focus {
 
 
 # ══════════════════════════════════════════════════════════════
-# NPM PATH DETECTION  (Windows / macOS / Linux)
-# ══════════════════════════════════════════════════════════════
-def get_npm_global_modules() -> str:
-    try:
-        r = subprocess.run(
-            ["npm", "root", "-g"],
-            capture_output=True, text=True, shell=(os.name == "nt"),
-        )
-        path = r.stdout.strip()
-        if path and os.path.isdir(path):
-            return path
-    except Exception:
-        pass
-    return ""
-
-NPM_GLOBAL = get_npm_global_modules()
-
-
-# ══════════════════════════════════════════════════════════════
 # AI CALL
 # ══════════════════════════════════════════════════════════════
 def call_ai(system_prompt, user_prompt, temperature=0.3):
@@ -576,13 +560,8 @@ JOB DESCRIPTION (target role):
 
 
 # ══════════════════════════════════════════════════════════════
-# STEP 5 — Build DOCX via Node.js  (cross-platform)
+# STEP 5 — Build DOCX using pure python-docx (no Node.js needed)
 # ══════════════════════════════════════════════════════════════
-def js(s):
-    return json.dumps(str(s))
-
-_R = 11232
-
 _MON = (r'(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?'
         r'|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)')
 _DATE_RANGE_RE = re.compile(
@@ -672,203 +651,158 @@ def _parse_edu_pairs(edu_text: str):
     return entries
 
 
-def build_node_script(data: dict, out_path: str, nm: str) -> str:
-    nm = nm.replace("\\", "/")
-    out_escaped = out_path.replace("\\", "/")
+# ── python-docx helpers ───────────────────────────────────────
+_RIGHT_TAB_POS = Inches(7.8)   # content width: 8.5" - 0.35" - 0.35"
 
-    def skill_paras():
-        parts = []
-        for line in data["skills"].split("\n"):
-            line = line.strip()
-            if not line: continue
-            if ":" in line:
-                cat, rest = line.split(":", 1)
-                parts.append(
-                    f"new Paragraph({{spacing:{{after:22,line:276}},"
-                    f"children:[new TextRun({{text:{js(cat.strip()+': ')},bold:true,size:20,font:'Arial'}}),"
-                    f"new TextRun({{text:{js(rest.strip())},size:20,font:'Arial'}})]}}),")
-            else:
-                parts.append(
-                    f"new Paragraph({{spacing:{{after:22,line:276}},"
-                    f"children:[new TextRun({{text:{js(line)},size:20,font:'Arial'}})]}}),")
-        return "\n      ".join(parts)
+def _add_bottom_border(para):
+    pPr  = para._p.get_or_add_pPr()
+    pBdr = OxmlElement('w:pBdr')
+    bot  = OxmlElement('w:bottom')
+    bot.set(qn('w:val'),   'single')
+    bot.set(qn('w:sz'),    '12')
+    bot.set(qn('w:space'), '1')
+    bot.set(qn('w:color'), '000000')
+    pBdr.append(bot)
+    pPr.append(pBdr)
 
-    def work_paras():
-        parts = []
-        for line in data["work"].split("\n"):
-            line = line.strip()
-            if not line: continue
-            if line.startswith("-") or line.startswith("•"):
-                b = line.lstrip("-•· ").strip()
-                parts.append(
-                    f"new Paragraph({{numbering:{{reference:'bullets',level:0}},"
-                    f"alignment:AlignmentType.JUSTIFIED,spacing:{{after:0,line:276}},"
-                    f"children:[new TextRun({{text:{js(b)},size:20,font:'Arial'}})]}}),")
-            else:
-                left, right = _split_left_right(line)
-                if right:
-                    parts.append(
-                        f"new Paragraph({{spacing:{{before:80,after:6,line:276}},"
-                        f"tabStops:[{{type:TabStopType.RIGHT,position:R}}],"
-                        f"children:["
-                        f"new TextRun({{text:{js(left)},bold:true,size:20,font:'Arial'}}),"
-                        f"new TextRun({{text:{js(chr(9)+right)},size:20,font:'Arial'}})"
-                        f"]}}),")
-                else:
-                    parts.append(
-                        f"new Paragraph({{spacing:{{before:80,after:6,line:276}},"
-                        f"children:[new TextRun({{text:{js(left)},bold:true,size:20,font:'Arial'}})]}}),")
-        return "\n      ".join(parts)
+def _add_right_tab(para):
+    pPr    = para._p.get_or_add_pPr()
+    tabs   = OxmlElement('w:tabs')
+    tab    = OxmlElement('w:tab')
+    tab.set(qn('w:val'), 'right')
+    tab.set(qn('w:pos'), str(int(7.8 * 1440)))   # 11232 twips
+    tabs.append(tab)
+    pPr.append(tabs)
 
-    def edu_paras():
-        parts = []
-        for (uni, date, degree, location) in _parse_edu_pairs(data["education"]):
-            if uni:
-                parts.append(
-                    f"new Paragraph({{spacing:{{before:60,after:4,line:276}},"
-                    f"tabStops:[{{type:TabStopType.RIGHT,position:R}}],"
-                    f"children:["
-                    f"new TextRun({{text:{js(uni)},bold:true,size:20,font:'Arial'}}),"
-                    f"new TextRun({{text:{js(chr(9)+date)},size:20,font:'Arial'}})"
-                    f"]}}),")
-            if degree or location:
-                parts.append(
-                    f"new Paragraph({{spacing:{{before:0,after:22,line:276}},"
-                    f"tabStops:[{{type:TabStopType.RIGHT,position:R}}],"
-                    f"children:["
-                    f"new TextRun({{text:{js(degree)},size:20,font:'Arial'}}),"
-                    f"new TextRun({{text:{js(chr(9)+location)},size:20,font:'Arial'}})"
-                    f"]}}),")
-        return "\n      ".join(parts)
+def _sp(para, before=0, after=0, line=1.15):
+    para.paragraph_format.space_before  = Pt(before)
+    para.paragraph_format.space_after   = Pt(after)
+    para.paragraph_format.line_spacing  = line
 
-    def cert_paras():
-        parts = []
-        for line in data["certification"].split("\n"):
-            line = line.strip().lstrip("-• ").strip()
-            if not line: continue
-            parts.append(
-                f"new Paragraph({{spacing:{{after:20,line:276}},"
-                f"children:[new TextRun({{text:{js(line)},size:20,font:'Arial'}})]}}),")
-        return "\n      ".join(parts)
-
-    def lang_paras():
-        parts = []
-        for line in data["language"].split("\n"):
-            line = line.strip().lstrip("-• ").strip()
-            if not line: continue
-            parts.append(
-                f"new Paragraph({{numbering:{{reference:'bullets',level:0}},"
-                f"spacing:{{after:0,line:276}},"
-                f"children:[new TextRun({{text:{js(line)},size:20,font:'Arial'}})]}}),")
-        return "\n      ".join(parts)
-
-    return f"""
-const Module = require('module');
-Module.globalPaths.push({js(nm)});
-
-const {{ Document, Packer, Paragraph, TextRun,
-         TabStopType, AlignmentType, BorderStyle, LevelFormat }} = require('docx');
-const fs = require('fs');
-
-function H(title) {{
-  return new Paragraph({{
-    spacing: {{ before: 140, after: 60, line: 276 }},
-    border:  {{ bottom: {{ style: BorderStyle.SINGLE, size: 12, color: '000000', space: 1 }} }},
-    children: [new TextRun({{ text: title, bold: true, size: 24, font: 'Arial' }})]
-  }});
-}}
-
-const R = 11232;
-
-const doc = new Document({{
-  numbering: {{
-    config: [{{
-      reference: 'bullets',
-      levels: [{{
-        level: 0, format: LevelFormat.BULLET, text: '\\u2022',
-        alignment: AlignmentType.LEFT,
-        style: {{ paragraph: {{ indent: {{ left: 360, hanging: 180 }} }} }}
-      }}]
-    }}]
-  }},
-  sections: [{{
-    properties: {{
-      page: {{
-        size:   {{ width: 12240, height: 15840 }},
-        margin: {{ top: 504, bottom: 432, left: 504, right: 504 }}
-      }}
-    }},
-    children: [
-      new Paragraph({{
-        spacing: {{ after: 0, line: 276 }},
-        tabStops: [{{ type: TabStopType.RIGHT, position: R }}],
-        children: [
-          new TextRun({{ text: 'Junaid Hasan', bold: true, size: 34, font: 'Arial' }}),
-          new TextRun({{ text: '\\tGermany', size: 22, font: 'Arial' }}),
-        ]
-      }}),
-      new Paragraph({{
-        spacing: {{ after: 80, line: 276 }},
-        tabStops: [{{ type: TabStopType.RIGHT, position: R }}],
-        border: {{ bottom: {{ style: BorderStyle.SINGLE, size: 12, color: '000000', space: 1 }} }},
-        children: [
-          new TextRun({{ text: {js(data['title'])}, size: 22, font: 'Arial' }}),
-          new TextRun({{ text: '\\tTel: +4915563388607   E-mail: junaidhasan696@gmail.com   LinkedIn',
-                         size: 20, font: 'Arial' }}),
-        ]
-      }}),
-      H('SKILLS'),
-      {skill_paras()}
-      H('WORK EXPERIENCE'),
-      {work_paras()}
-      H('EDUCATION'),
-      {edu_paras()}
-      H('CERTIFICATION'),
-      {cert_paras()}
-      H('Language'),
-      {lang_paras()}
-    ]
-  }}]
-}});
-
-Packer.toBuffer(doc)
-  .then(buf => {{ fs.writeFileSync({js(out_escaped)}, buf); process.stdout.write('OK:' + buf.length); }})
-  .catch(e  => {{ process.stderr.write(String(e)); process.exit(1); }});
-"""
+def _run(para, text, bold=False, size=10):
+    r = para.add_run(text)
+    r.font.name = 'Arial'
+    r.font.size = Pt(size)
+    r.bold      = bold
+    return r
 
 
 def create_docx(data: dict):
-    with tempfile.TemporaryDirectory() as tmp:
-        nm_path = NPM_GLOBAL
-        if not nm_path or not os.path.isdir(os.path.join(nm_path, "docx")):
-            with st.spinner("📦 Installing docx package (one-time, ~30s)…"):
-                res = subprocess.run(
-                    ["npm", "install", "docx"],
-                    cwd=tmp, capture_output=True, text=True,
-                    shell=(os.name == "nt"),
-                )
-            if res.returncode != 0:
-                st.error(f"npm install failed:\n{res.stderr}")
-                return None
-            nm_path = os.path.join(tmp, "node_modules")
+    """Build the CV DOCX entirely with python-docx — works on Streamlit Cloud."""
+    doc = Document()
 
-        script_path = os.path.join(tmp, "gen.js")
-        out_path    = os.path.join(tmp, "cv.docx")
+    # ── Page margins ──────────────────────────────────────────
+    sec = doc.sections[0]
+    sec.top_margin    = Inches(0.35)
+    sec.bottom_margin = Inches(0.30)
+    sec.left_margin   = Inches(0.35)
+    sec.right_margin  = Inches(0.35)
 
-        with open(script_path, "w", encoding="utf-8") as f:
-            f.write(build_node_script(data, out_path, nm_path))
+    # ── Default font ──────────────────────────────────────────
+    doc.styles['Normal'].font.name = 'Arial'
+    doc.styles['Normal'].font.size = Pt(10)
 
-        res = subprocess.run(
-            ["node", script_path],
-            capture_output=True, text=True,
-            shell=(os.name == "nt"),
-            cwd=tmp,
-        )
-        if res.returncode != 0 or not os.path.exists(out_path):
-            st.error(f"DOCX generation failed:\n{res.stderr or res.stdout}")
-            return None
+    # ── Section heading helper ────────────────────────────────
+    def heading(title):
+        p = doc.add_paragraph()
+        _sp(p, before=7, after=3)
+        _add_bottom_border(p)
+        _run(p, title, bold=True, size=12)
 
-        return io.BytesIO(open(out_path, "rb").read())
+    # ── NAME + LOCATION ───────────────────────────────────────
+    p = doc.add_paragraph()
+    _sp(p, before=0, after=0)
+    _add_right_tab(p)
+    _run(p, 'Junaid Hasan', bold=True, size=17)
+    _run(p, '\tGermany', size=11)
+
+    # ── TITLE + CONTACT ───────────────────────────────────────
+    p2 = doc.add_paragraph()
+    _sp(p2, before=0, after=4)
+    _add_right_tab(p2)
+    _add_bottom_border(p2)
+    _run(p2, data['title'], size=11)
+    _run(p2, '\tTel: +4915563388607   E-mail: junaidhasan696@gmail.com   LinkedIn', size=10)
+
+    # ── SKILLS ────────────────────────────────────────────────
+    heading('SKILLS')
+    for line in data['skills'].split('\n'):
+        line = line.strip()
+        if not line: continue
+        p = doc.add_paragraph()
+        _sp(p, after=1)
+        if ':' in line:
+            cat, rest = line.split(':', 1)
+            _run(p, cat.strip() + ': ', bold=True)
+            _run(p, rest.strip())
+        else:
+            _run(p, line)
+
+    # ── WORK EXPERIENCE ───────────────────────────────────────
+    heading('WORK EXPERIENCE')
+    for line in data['work'].split('\n'):
+        line = line.strip()
+        if not line: continue
+        if line.startswith('-') or line.startswith('•'):
+            bullet = line.lstrip('-•· ').strip()
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
+            p.paragraph_format.left_indent       = Inches(0.20)
+            p.paragraph_format.first_line_indent = Inches(-0.15)
+            _sp(p, after=0)
+            _run(p, '•  ' + bullet)
+        else:
+            left, right = _split_left_right(line)
+            p = doc.add_paragraph()
+            _sp(p, before=4, after=1)
+            if right:
+                _add_right_tab(p)
+                _run(p, left, bold=True)
+                _run(p, '\t' + right)
+            else:
+                _run(p, left, bold=True)
+
+    # ── EDUCATION ─────────────────────────────────────────────
+    heading('EDUCATION')
+    for (uni, date, degree, location) in _parse_edu_pairs(data['education']):
+        if uni:
+            p = doc.add_paragraph()
+            _sp(p, before=3, after=0)
+            _add_right_tab(p)
+            _run(p, uni, bold=True)
+            _run(p, '\t' + date)
+        if degree or location:
+            p = doc.add_paragraph()
+            _sp(p, before=0, after=1)
+            _add_right_tab(p)
+            _run(p, degree)
+            _run(p, '\t' + location)
+
+    # ── CERTIFICATION ─────────────────────────────────────────
+    heading('CERTIFICATION')
+    for line in data['certification'].split('\n'):
+        line = line.strip().lstrip('-• ').strip()
+        if not line: continue
+        p = doc.add_paragraph()
+        _sp(p, after=1)
+        _run(p, line)
+
+    # ── LANGUAGE ──────────────────────────────────────────────
+    heading('Language')
+    for line in data['language'].split('\n'):
+        line = line.strip().lstrip('-• ').strip()
+        if not line: continue
+        p = doc.add_paragraph()
+        p.paragraph_format.left_indent       = Inches(0.20)
+        p.paragraph_format.first_line_indent = Inches(-0.15)
+        _sp(p, after=0)
+        _run(p, '•  ' + line)
+
+    # ── Save to buffer ────────────────────────────────────────
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
 
 
 # ══════════════════════════════════════════════════════════════
